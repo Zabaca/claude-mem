@@ -58,8 +58,28 @@ the following are missing or invalid in Docker:
 | `CLAUDE_MEM_AUTH_MODE`            | Always   | Must NOT be `local-dev` in Docker.                           |
 | `CLAUDE_MEM_ALLOW_LOCAL_DEV_BYPASS` | Docker | Must NOT be `1`/`true` in Docker.                            |
 | `CLAUDE_MEM_GENERATION_DISABLED`  | Optional | Set to `true` on the HTTP service when running a separate worker. |
-| `CLAUDE_MEM_SERVER_PROVIDER`      | Worker   | One of `claude`, `gemini`, `openrouter`. Worker only.        |
-| `ANTHROPIC_API_KEY` (or alt)      | Worker   | Required by the chosen provider.                             |
+| `CLAUDE_MEM_SERVER_PROVIDER`      | Worker   | One of `claude`, `claude-sdk`, `gemini`, `openrouter`. Worker only. |
+| `ANTHROPIC_API_KEY` (or alt)      | Worker   | Required by the `claude`, `gemini` and `openrouter` providers. |
+| `CLAUDE_CODE_OAUTH_TOKEN`         | Worker   | `claude-sdk` only: subscription token from `claude setup-token`. A credentials file (`CLAUDE_MEM_CREDENTIALS_FILE`) works too; without either the worker warns at startup. |
+| `CLAUDE_MEM_SERVER_MODEL`         | Optional | Model id for the chosen provider. `claude-sdk` defaults to `claude-haiku-4-5-20251001`. |
+| `CLAUDE_MEM_SERVER_SDK_TIMEOUT_MS`| Optional | `claude-sdk` only: per-job CLI timeout, default 120000. Keep it under the 5-minute job lock. |
+| `CLAUDE_MEM_SERVER_CLAUDE_PATH`   | Optional | `claude-sdk` only: path to the `claude` CLI. Defaults to the same discovery the worker runtime uses. |
+
+### The `claude-sdk` provider
+
+`CLAUDE_MEM_SERVER_PROVIDER=claude-sdk` generates observations through the
+Claude Code CLI (via the Claude Agent SDK) rather than a direct Messages API
+call, so a Claude subscription's OAuth token authenticates it — no API key.
+Each job spawns the CLI once with no tools, no settings sources, thinking off
+and auto-memory off, which is roughly 124 tokens of overhead on top of the
+prompt. The default model is `claude-haiku-4-5-20251001`: this is an
+extraction task, and the local worker's default is haiku for the same reason.
+The worker logs a warning at startup when it can see no credential at all
+(no `CLAUDE_CODE_OAUTH_TOKEN`, no credentials file, no
+`~/.claude/.credentials.json`) — on a Mac the login Keychain still works, so
+it is a warning, not a failure. Only `transient` and `rate_limit` errors retry;
+a rejected subscription rate limit carries its reset time as the retry delay,
+capped at six hours.
 
 Local development can still use SQLite + `local-dev` auth bypass **outside
 Docker only**. Deployable mode must use the table above.

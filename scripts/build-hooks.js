@@ -440,13 +440,19 @@ async function buildHooks() {
         'zod',
       ],
       define: {
-        '__DEFAULT_PACKAGE_VERSION__': `"${version}"`
+        '__DEFAULT_PACKAGE_VERSION__': `"${version}"`,
+        // Same polyfill as the worker build above: the claude-sdk server
+        // provider inlines @anthropic-ai/claude-agent-sdk, whose *.mjs uses
+        // createRequire(import.meta.url), and the server bundle had no
+        // definition for it.
+        'import.meta.url': '__IMPORT_META_URL__'
       },
       banner: {
         js: [
           '#!/usr/bin/env bun',
           'var __filename = __filename || require("node:path").resolve(process.argv[1] || "");',
-          'var __dirname = __dirname || require("node:path").dirname(__filename);'
+          'var __dirname = __dirname || require("node:path").dirname(__filename);',
+          'var __IMPORT_META_URL__ = require("node:url").pathToFileURL(__filename).href;'
         ].join('\n')
       }
     });

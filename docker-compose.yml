@@ -170,6 +170,12 @@ services:
       CLAUDE_MEM_ANTHROPIC_API_KEY: ${CLAUDE_MEM_ANTHROPIC_API_KEY:-}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      # claude-sdk provider (Zabaca fork): generation goes through the Claude
+      # Code CLI on a subscription OAuth token (`claude setup-token`) instead of
+      # an API key. The image already installs the CLI globally.
+      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
+      CLAUDE_MEM_SERVER_MODEL: ${CLAUDE_MEM_SERVER_MODEL:-}
+      CLAUDE_MEM_SERVER_SDK_TIMEOUT_MS: ${CLAUDE_MEM_SERVER_SDK_TIMEOUT_MS:-}
     volumes:
       - claude-mem-data:/data/claude-mem
       # #2558 — credentials-file mount (see server service above). Keeps

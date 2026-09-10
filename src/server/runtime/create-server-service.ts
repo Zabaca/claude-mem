@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { existsSync } from 'fs';
+import { homedir } from 'os';
+import { join } from 'path';
 import { logger } from '../../utils/logger.js';
 import { ModeManager } from '../../services/domain/ModeManager.js';
 import { getSharedPostgresPool, SERVER_POSTGRES_SCHEMA_VERSION } from '../../storage/postgres/index.js';
@@ -10,6 +12,8 @@ import { getRedisQueueConfig } from '../queue/redis-config.js';
 import { ActiveServerQueueManager } from './ActiveServerQueueManager.js';
 import { ActiveServerGenerationWorkerManager } from './ActiveServerGenerationWorkerManager.js';
 import { ClaudeObservationProvider } from '../generation/providers/ClaudeObservationProvider.js';
+import { ClaudeSdkObservationProvider } from '../generation/providers/ClaudeSdkObservationProvider.js';
+import { findClaudeExecutable } from '../../shared/find-claude-executable.js';
 import { GeminiObservationProvider } from '../generation/providers/GeminiObservationProvider.js';
 import { OpenRouterObservationProvider } from '../generation/providers/OpenRouterObservationProvider.js';
 import type { ServerGenerationProvider } from '../generation/providers/shared/types.js';
@@ -136,6 +140,8 @@ export function validateServerEnv(
     errors.push('CLAUDE_MEM_REDIS_URL is required when CLAUDE_MEM_QUEUE_ENGINE=bullmq.');
   }
 
+  warnIfClaudeSdkHasNoCredential(env);
+
   if (errors.length > 0) {
     const message = [
       'server startup configuration is invalid:',
@@ -155,6 +161,26 @@ export function validateServerEnv(
     hasDatabaseUrl,
     hasRedisUrl,
   };
+}
+
+// The claude-sdk provider authenticates through the Claude Code CLI, which
+// reads CLAUDE_CODE_OAUTH_TOKEN, else a credentials file, else (on a Mac) the
+// login Keychain. No other provider's credential is checked at startup either,
+// and a worker with none of these generates nothing while looking healthy —
+// so this warns. It cannot fail: the Keychain case leaves nothing to inspect.
+export function warnIfClaudeSdkHasNoCredential(env: NodeJS.ProcessEnv = process.env): boolean {
+  const provider = (env.CLAUDE_MEM_SERVER_PROVIDER ?? '').trim().toLowerCase();
+  if (provider !== 'claude-sdk') return true;
+  if ((env.CLAUDE_CODE_OAUTH_TOKEN ?? '').trim()) return true;
+  const credentialsFile = (env.CLAUDE_MEM_CREDENTIALS_FILE ?? '').trim();
+  if (credentialsFile && existsSync(credentialsFile)) return true;
+  const home = env.HOME ?? homedir();
+  if (home && existsSync(join(home, '.claude', '.credentials.json'))) return true;
+  logger.warn(
+    'SYSTEM',
+    'CLAUDE_MEM_SERVER_PROVIDER=claude-sdk but no credential is visible: set CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`) or mount a credentials file. Generation will fail on every job unless the CLI can authenticate another way (macOS Keychain).',
+  );
+  return false;
 }
 
 // #2443 — the server runtime must load an observation mode before it can
@@ -253,7 +279,18 @@ function buildServerGenerationProviderFromEnv(): ServerGenerationProvider | null
   }
 }
 
-function instantiateServerGenerationProvider(provider: string): ServerGenerationProvider | null {
+export function instantiateServerGenerationProvider(provider: string): ServerGenerationProvider | null {
+  if (provider === 'claude-sdk') {
+    const opts: ConstructorParameters<typeof ClaudeSdkObservationProvider>[0] = {
+      // A throw here (no usable CLI on the machine) is caught by
+      // buildServerGenerationProviderFromEnv → warn + generation disabled.
+      claudePath: process.env.CLAUDE_MEM_SERVER_CLAUDE_PATH || findClaudeExecutable('SDK'),
+    };
+    if (process.env.CLAUDE_MEM_SERVER_MODEL) opts.model = process.env.CLAUDE_MEM_SERVER_MODEL;
+    const timeoutMs = Number(process.env.CLAUDE_MEM_SERVER_SDK_TIMEOUT_MS ?? '');
+    if (Number.isFinite(timeoutMs) && timeoutMs > 0) opts.timeoutMs = timeoutMs;
+    return new ClaudeSdkObservationProvider(opts);
+  }
   if (provider === 'claude' || provider === 'anthropic') {
     const apiKey = process.env.ANTHROPIC_API_KEY ?? process.env.CLAUDE_MEM_ANTHROPIC_API_KEY ?? '';
     if (!apiKey) return null;
