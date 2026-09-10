@@ -84,6 +84,35 @@ capped at six hours.
 Local development can still use SQLite + `local-dev` auth bypass **outside
 Docker only**. Deployable mode must use the table above.
 
+## Fleet endpoints: per-repo projects and recent-context injection
+
+Upstream's server lane covers writes only: hooks send every event to one static
+`CLAUDE_MEM_SERVER_PROJECT_ID`, and the SessionStart hook always asks the local
+worker for context. The fork closes that gap.
+
+- `POST /v1/projects/resolve` (write scope) — body `{ names: string[1..8] }`. Get-or-creates
+  projects by name within the key's team and returns `{ projects: [{ id, name }] }` in request
+  order. Hooks call it once per repo (the names `getProjectContext` gives: parent and
+  worktree) and cache the ids in `~/.claude-mem/server-projects.json` (0600). Leave
+  `CLAUDE_MEM_SERVER_PROJECT_ID` empty to bucket per repo; set it to pin one project.
+- `POST /v1/context/recent` (read scope) — body `{ projects: string[1..8], platformSource?,
+  colors? }`. The worker's `GET /api/context/inject`, on Postgres: newest observations and
+  session summaries across the named projects, filtered by the active mode, rendered by the
+  same code as the worker. Unknown names are empty; nothing is created on a read. Returns
+  `{ context, stats }`.
+- `GET /v1/observations/latest` (read scope) — `{ createdAt, count }` for the team; a cheap
+  "is it storing" signal for monitoring.
+
+Team-scoped keys: `server api-key create --team <id> --team-scoped --name <client>` mints a key
+with no project so it may act on every project in its team. The name is kept (as the key's
+actor id), shown by `api-key list`, and `api-key revoke --name <client>` revokes every active
+key of that name.
+
+`CLAUDE_MEM_SERVER_WORKER_FALLBACK=false` (client settings) turns off the fall-through to the
+local worker when the server is unreachable: a fleet client then logs a hook failure instead
+of writing into a local SQLite nobody reads. `worker-service.cjs start` is a no-op when
+`CLAUDE_MEM_RUNTIME=server`, so no worker or Chroma is spawned on such a client.
+
 ## Generation worker mode (`claude-mem server worker start`)
 
 The same image runs the generation worker via:

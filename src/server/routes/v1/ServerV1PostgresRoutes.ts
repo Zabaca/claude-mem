@@ -34,6 +34,11 @@ import { PostgresServerSessionsRepository } from '../../../storage/postgres/serv
 import { IngestEventsService, type EnqueueOutcome } from '../../services/IngestEventsService.js';
 import { EndSessionService } from '../../services/EndSessionService.js';
 import { normalizePlatformSource, normalizePlatformSourceOrNull } from '../../../shared/platform-source.js';
+import { loadContextConfig } from '../../../services/context/ContextConfigLoader.js';
+import { renderContext } from '../../../services/context/render.js';
+import { SUMMARY_LOOKAHEAD } from '../../../services/context/types.js';
+import type { ContextConfig, Observation as ContextObservation, SessionSummary as ContextSummary } from '../../../services/context/types.js';
+import type { PostgresObservation } from '../../../storage/postgres/observations.js';
 
 const SOURCE_ADAPTER_DEFAULT = 'api';
 
@@ -999,6 +1004,109 @@ export class ServerV1PostgresRoutes implements RouteHandler {
         });
       },
     ));
+
+    // Fleet: per-repo projects. A hook resolves the names `getProjectContext`
+    // gives it (parent + worktree) to ids once and caches them; a key scoped
+    // to a team (project_id NULL) may then write to any of them.
+    app.post('/v1/projects/resolve', writeAuth, this.handleCreate(
+      z.object({
+        names: z.array(z.string().min(1).max(512)).min(1).max(8),
+      }),
+      async (req, res, body) => {
+        const teamId = this.requireTeamId(req, res);
+        if (!teamId) return;
+        const names = Array.from(new Set(body.names));
+        let projects: Array<{ id: string; name: string }>;
+        try {
+          const repo = new PostgresProjectsRepository(this.options.pool);
+          projects = await repo.resolveByNames({ teamId, names });
+        } catch (error) {
+          const err = error instanceof Error ? error : new Error(String(error));
+          logger.warn('SYSTEM', 'project.resolve failed', { requestId: req.requestId ?? null }, err);
+          this.handleDbError(err, res, 'project.resolve');
+          return;
+        }
+        // A project-scoped key may only resolve its own project.
+        const scoped = req.authContext?.projectId ?? null;
+        if (scoped && projects.some(p => p.id !== scoped)) {
+          res.status(403).json({ error: 'Forbidden', message: 'API key is scoped to a different project' });
+          return;
+        }
+        await this.auditWrite(req, 'project.resolve', null, null, {
+          names,
+          projectIds: projects.map(p => p.id),
+        });
+        const byName = new Map(projects.map(p => [p.name, p]));
+        res.status(200).json({
+          projects: body.names.map(name => byName.get(name)).filter(Boolean),
+        });
+      },
+    ));
+
+    // Fleet: the worker's `GET /api/context/inject`, on Postgres. Names that
+    // do not exist yet are simply empty — nothing is created on a read.
+    app.post('/v1/context/recent', readAuth, this.handleCreate(
+      z.object({
+        projects: z.array(z.string().min(1).max(512)).min(1).max(8),
+        platformSource: z.string().min(1).nullable().optional(),
+        colors: z.boolean().optional(),
+      }),
+      async (req, res, body) => {
+        const teamId = this.requireTeamId(req, res);
+        if (!teamId) return;
+        const platformSource = normalizePlatformSourceOrNull(body.platformSource);
+        const forHuman = body.colors === true;
+        const names = Array.from(new Set(body.projects));
+        const primary = body.projects[body.projects.length - 1]!;
+        const config = loadContextConfig();
+        let rendered: ReturnType<typeof renderContext>;
+        try {
+          const projectsRepo = new PostgresProjectsRepository(this.options.pool);
+          let found = await projectsRepo.findByNames({ teamId, names });
+          const scoped = req.authContext?.projectId ?? null;
+          if (scoped) found = found.filter(p => p.id === scoped);
+          const obsRepo = new PostgresObservationRepository(this.options.pool);
+          const rows = await obsRepo.listRecentForProjects({
+            teamId,
+            projectIds: found.map(p => p.id),
+            limit: config.totalObservationCount + config.sessionCount + SUMMARY_LOOKAHEAD,
+            platformSource,
+          });
+          const nameById = new Map(found.map(p => [p.id, p.name]));
+          const { observations, summaries } = shapeRecentRows(rows, nameById, config);
+          rendered = renderContext(config, observations, summaries, primary, forHuman);
+        } catch (error) {
+          const err = error instanceof Error ? error : new Error(String(error));
+          logger.warn('SYSTEM', 'context.recent failed', { requestId: req.requestId ?? null }, err);
+          this.handleDbError(err, res, 'context.recent');
+          return;
+        }
+        await this.auditWrite(req, 'observation.read', null, null, {
+          mode: 'recent',
+          projects: names,
+          platformSource,
+          observationCount: rendered.stats?.observation_count ?? 0,
+        });
+        res.status(200).json({ context: rendered.text, stats: rendered.stats });
+      },
+    ));
+
+    // Fleet: "is it storing" — newest observation for the caller's team.
+    app.get('/v1/observations/latest', readAuth, this.asyncHandler(async (req, res) => {
+      const teamId = this.requireTeamId(req, res);
+      if (!teamId) return;
+      try {
+        const repo = new PostgresObservationRepository(this.options.pool);
+        const latest = await repo.latestForTeam(teamId);
+        res.status(200).json({
+          createdAt: latest.createdAt ? latest.createdAt.toISOString() : null,
+          count: latest.count,
+        });
+      } catch (error) {
+        const err = error instanceof Error ? error : new Error(String(error));
+        this.handleDbError(err, res, 'observation.latest');
+      }
+    }));
 
     // Remote authenticated MCP endpoint. The "secure MCP link" a user pastes
     // into Claude Code (or any MCP client) to recall their cloud memory:
@@ -2073,5 +2181,65 @@ function serializeGenerationJobStatus(
     lastError: job.lastError,
     createdAtEpoch: job.createdAtEpoch,
     updatedAtEpoch: job.updatedAtEpoch,
+  };
+}
+
+// Fleet: Postgres rows → the worker's row types, so `renderContext` draws the
+// same timeline. The type/concept filter the worker applies in SQL is applied
+// here; a summary row is `kind='summary'` with its fields in metadata.
+function shapeRecentRows(
+  rows: PostgresObservation[],
+  nameById: Map<string, string>,
+  config: ContextConfig,
+): { observations: ContextObservation[]; summaries: ContextSummary[] } {
+  const observations: ContextObservation[] = [];
+  const summaries: ContextSummary[] = [];
+  const str = (v: unknown): string | null => (typeof v === 'string' && v.length > 0 ? v : null);
+  const list = (v: unknown): string | null => {
+    if (Array.isArray(v)) return JSON.stringify(v);
+    return str(v);
+  };
+  let seq = 0;
+  for (const row of rows) {
+    seq += 1;
+    const m = row.metadata;
+    const createdAt = new Date(row.createdAtEpoch).toISOString();
+    const base = {
+      id: seq,
+      memory_session_id: row.serverSessionId ?? row.id,
+      created_at: createdAt,
+      created_at_epoch: row.createdAtEpoch,
+      project: nameById.get(row.projectId),
+    };
+    if (row.kind === 'summary') {
+      summaries.push({
+        ...base,
+        request: str(m.request),
+        investigated: str(m.investigated),
+        learned: str(m.learned),
+        completed: str(m.completed),
+        next_steps: str(m.next_steps),
+      });
+      continue;
+    }
+    if (!config.observationTypes.has(row.kind)) continue;
+    const concepts = Array.isArray(m.concepts) ? (m.concepts as unknown[]).filter((c): c is string => typeof c === 'string') : [];
+    if (!concepts.some(c => config.observationConcepts.has(c))) continue;
+    observations.push({
+      ...base,
+      type: row.kind,
+      title: str(m.title),
+      subtitle: str(m.subtitle),
+      narrative: str(m.narrative) ?? row.content,
+      facts: list(m.facts),
+      concepts: JSON.stringify(concepts),
+      files_read: list(m.files_read),
+      files_modified: list(m.files_modified),
+      discovery_tokens: null,
+    });
+  }
+  return {
+    observations: observations.slice(0, config.totalObservationCount),
+    summaries: summaries.slice(0, config.sessionCount + SUMMARY_LOOKAHEAD),
   };
 }

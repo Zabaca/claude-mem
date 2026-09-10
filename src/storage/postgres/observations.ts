@@ -151,6 +151,62 @@ export class PostgresObservationRepository {
     return result.rows.map(mapObservationRow);
   }
 
+  // Fleet: the recency slice behind POST /v1/context/recent — newest rows
+  // across a repo's parent/worktree projects, no text query. Platform
+  // filtering mirrors `search` (session's platform, else the source event's).
+  async listRecentForProjects(input: {
+    teamId: string;
+    projectIds: string[];
+    limit: number;
+    platformSource?: string | null;
+  }): Promise<PostgresObservation[]> {
+    if (input.projectIds.length === 0) return [];
+    const platformSource = normalizePlatformSourceOrNull(input.platformSource);
+    const result = await this.client.query<ObservationRow>(
+      `
+        SELECT observations.* FROM observations
+        LEFT JOIN server_sessions
+          ON server_sessions.id = observations.server_session_id
+          AND server_sessions.project_id = observations.project_id
+          AND server_sessions.team_id = observations.team_id
+        WHERE observations.team_id = $1
+          AND observations.project_id = ANY($2::text[])
+          AND (
+            $4::text IS NULL
+            OR server_sessions.platform_source = $4
+            OR (
+              observations.server_session_id IS NULL
+              AND EXISTS (
+                SELECT 1
+                FROM observation_sources
+                INNER JOIN agent_events
+                  ON agent_events.id = observation_sources.agent_event_id
+                  AND agent_events.project_id = observations.project_id
+                  AND agent_events.team_id = observations.team_id
+                WHERE observation_sources.observation_id = observations.id
+                  AND observation_sources.source_type = 'agent_event'
+                  AND agent_events.platform_source = $4
+              )
+            )
+          )
+        ORDER BY observations.created_at DESC
+        LIMIT $3
+      `,
+      [input.teamId, input.projectIds, input.limit, platformSource]
+    );
+    return result.rows.map(mapObservationRow);
+  }
+
+  // Fleet: the "is it storing" signal for the fleet CLI.
+  async latestForTeam(teamId: string): Promise<{ createdAt: Date | null; count: number }> {
+    const row = await queryOne<{ created_at: Date | null; count: string }>(
+      this.client,
+      'SELECT MAX(created_at) AS created_at, COUNT(*)::text AS count FROM observations WHERE team_id = $1',
+      [teamId]
+    );
+    return { createdAt: row?.created_at ?? null, count: Number(row?.count ?? 0) };
+  }
+
   async search(input: {
     projectId: string;
     teamId: string;

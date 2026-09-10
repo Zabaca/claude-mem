@@ -542,27 +542,36 @@ export async function runServerApiKeyCli(argv: string[]): Promise<void> {
       // local team+project, then create a NEW key against those IDs with
       // the caller's requested scopes (the bootstrap key uses hook scopes,
       // which is the wrong default for an arbitrary CLI-issued key).
+      //
+      // Fleet: `--team-scoped` leaves project_id NULL so the key may act on
+      // any project in its team (hooks resolve projects per repo). The
+      // bootstrap runs only when neither id was given: a caller passing
+      // `--team` alone with `--team-scoped` wants exactly that team.
+      const teamScoped = options['team-scoped'] === true;
       let teamId = options.team ?? null;
-      let projectId = options.project ?? null;
-      if (!teamId || !projectId) {
+      let projectId = teamScoped ? null : (options.project ?? null);
+      if (!teamId && !projectId) {
         const { bootstrapServerApiKey } = await import('../../services/hooks/server-bootstrap.js');
         const result = await bootstrapServerApiKey({ pool, closePool: false });
         teamId = result.teamId;
-        projectId = result.projectId;
+        if (!teamScoped) projectId = result.projectId;
       }
       const rawKey = `cmem_${randomBytes(24).toString('hex')}`;
       const keyHash = createHash('sha256').update(rawKey).digest('hex');
+      const name = options.name ?? 'server-api-key';
       const created = await repo.createApiKey({
         keyHash,
         teamId,
         projectId,
         scopes,
-        actorId: 'system:server-cli',
+        // The table has no name column; the actor id carries it so `list`
+        // can show it and `revoke --name` can find it.
+        actorId: options.name ? cliKeyActorId(options.name) : 'system:server-cli',
       });
       console.log(JSON.stringify({
         id: created.id,
         key: rawKey,
-        name: options.name ?? 'server-api-key',
+        name,
         teamId,
         projectId,
         scopes,
@@ -599,13 +608,15 @@ export async function runServerApiKeyCli(argv: string[]): Promise<void> {
         id: string;
         team_id: string | null;
         project_id: string | null;
+        actor_id: string;
         scopes: unknown;
         revoked_at: Date | null;
         expires_at: Date | null;
         last_used_at: Date | null;
         created_at: Date;
       }>(
-        `SELECT id, team_id, project_id, scopes, revoked_at, expires_at, last_used_at, created_at
+        `SELECT id, team_id, project_id, actor_id, scopes, revoked_at, expires_at,
+                NULL::timestamptz AS last_used_at, created_at
          FROM api_keys
          ${where}
          ORDER BY created_at DESC
@@ -621,6 +632,7 @@ export async function runServerApiKeyCli(argv: string[]): Promise<void> {
           id: row.id,
           teamId: row.team_id,
           projectId: row.project_id,
+          name: cliKeyName(row.actor_id),
           scopes: row.scopes,
           status: row.revoked_at ? 'revoked' : 'active',
           lastUsedAt: row.last_used_at?.toISOString() ?? null,
@@ -632,9 +644,24 @@ export async function runServerApiKeyCli(argv: string[]): Promise<void> {
     }
 
     if (sub === 'revoke') {
+      // Fleet: `revoke --name <name>` revokes every active key created with
+      // that `--name` (zero is fine — the installer calls it before minting).
+      if (options.name) {
+        const result = await pool.query<{ id: string }>(
+          `UPDATE api_keys SET revoked_at = now()
+           WHERE actor_id = $1 AND revoked_at IS NULL
+           RETURNING id`,
+          [cliKeyActorId(options.name)],
+        );
+        console.log(JSON.stringify({
+          name: options.name,
+          revoked: result.rows.map(row => row.id),
+        }, null, 2));
+        return;
+      }
       const id = argv[1];
       if (!id) {
-        console.error('Usage: server-service server api-key revoke <id>');
+        console.error('Usage: server-service server api-key revoke <id> | --name <name>');
         process.exit(1);
       }
       const result = await pool.query(
@@ -783,6 +810,17 @@ interface CliFlagValues {
   offset?: string;
   status?: string;
   active?: boolean;
+  'team-scoped'?: boolean;
+}
+
+const CLI_KEY_ACTOR_PREFIX = 'cli:';
+
+export function cliKeyActorId(name: string): string {
+  return `${CLI_KEY_ACTOR_PREFIX}${name}`;
+}
+
+export function cliKeyName(actorId: string): string | null {
+  return actorId.startsWith(CLI_KEY_ACTOR_PREFIX) ? actorId.slice(CLI_KEY_ACTOR_PREFIX.length) : null;
 }
 
 function parseFlagArgs(argv: string[]): CliFlagValues {
@@ -794,6 +832,7 @@ function parseFlagArgs(argv: string[]): CliFlagValues {
       team: { type: 'string' },
       project: { type: 'string' },
       name: { type: 'string' },
+      'team-scoped': { type: 'boolean' },
       limit: { type: 'string' },
       offset: { type: 'string' },
       status: { type: 'string' },
