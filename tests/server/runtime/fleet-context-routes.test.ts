@@ -149,7 +149,7 @@ describe('fleet context routes', () => {
     const [parent, wt] = await resolve(['repo', 'repo/wt']);
     await storage.observations.create({
       projectId: parent!.id, teamId, kind: 'discovery', content: 'found the thing',
-      metadata: { title: 'Found the thing', subtitle: 'in parent', facts: ['a fact'], concepts: ['how-it-works'], narrative: 'found it' },
+      metadata: { title: 'Found the thing', subtitle: 'in parent', facts: ['a fact'], concepts: ['Free-text concept, as the server lane writes them'], narrative: 'found it' },
     });
     await storage.observations.create({
       projectId: wt!.id, teamId, kind: 'decision', content: 'decided',

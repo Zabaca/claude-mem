@@ -2223,8 +2223,11 @@ function shapeRecentRows(
       continue;
     }
     if (!config.observationTypes.has(row.kind)) continue;
+    // The type filter only. The worker also filters on the mode's concept
+    // ids, but the server-lane prompt does not constrain concepts to that
+    // vocabulary (a generated row carries "Request timeout management", not
+    // "how-it-works"), so that filter would drop every generated observation.
     const concepts = Array.isArray(m.concepts) ? (m.concepts as unknown[]).filter((c): c is string => typeof c === 'string') : [];
-    if (!concepts.some(c => config.observationConcepts.has(c))) continue;
     observations.push({
       ...base,
       type: row.kind,
