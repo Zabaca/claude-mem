@@ -6,15 +6,21 @@
 // logger.* calls are DIAGNOSTIC and route through hook-io's stderr path.
 import type { EventHandler, NormalizedHookInput, HookResult } from '../types.js';
 import {
-  executeWithWorkerFallback,
-  isWorkerFallback,
+  executeWithWorkerFallback as defaultExecuteWithWorkerFallback,
+  isWorkerFallback as defaultIsWorkerFallback,
   getWorkerPort,
 } from '../../shared/worker-utils.js';
 import { getProjectContext } from '../../utils/project-name.js';
 import { HOOK_EXIT_CODES, HOOK_TIMEOUTS } from '../../shared/hook-constants.js';
 import { logger } from '../../utils/logger.js';
-import { loadFromFileOnce } from '../../shared/hook-settings.js';
-import { shouldTrackProject } from '../../shared/should-track-project.js';
+import { loadFromFileOnce as defaultLoadFromFileOnce } from '../../shared/hook-settings.js';
+import { shouldTrackProject as defaultShouldTrackProject } from '../../shared/should-track-project.js';
+import {
+  resolveRuntimeContext as defaultResolveRuntimeContext,
+  logServerFallback as defaultLogServerFallback,
+  type ServerRuntimeContext,
+} from '../../services/hooks/runtime-selector.js';
+import { isServerClientError } from '../../services/hooks/server-client.js';
 import { readStaleMarker } from '../../shared/oauth-token.js';
 import { normalizePlatformSource } from '../../shared/platform-source.js';
 import { proTrialLine, proTrialUrl, PLAN_USAGE_GAIN_PERCENT } from '../../shared/pro-promo.js';
@@ -25,9 +31,68 @@ import {
   trialDaysRemaining,
 } from '../../shared/cmem-gateway.js';
 
+// Wrappers, not references: tests patch these modules with `mock.module`
+// after this file's imports are hoisted, and only a live binding sees that.
+const defaultDependencies = {
+  executeWithWorkerFallback: ((...args: Parameters<typeof defaultExecuteWithWorkerFallback>) =>
+    defaultExecuteWithWorkerFallback(...args)) as typeof defaultExecuteWithWorkerFallback,
+  isWorkerFallback: ((value: unknown) => defaultIsWorkerFallback(value)) as typeof defaultIsWorkerFallback,
+  loadFromFileOnce: () => defaultLoadFromFileOnce(),
+  resolveRuntimeContext: () => defaultResolveRuntimeContext(),
+  logServerFallback: (reason: string, details?: Record<string, unknown>) => defaultLogServerFallback(reason, details),
+  shouldTrackProject: (cwd: string) => defaultShouldTrackProject(cwd),
+};
+
+let dependencies = defaultDependencies;
+
+export function setContextDependenciesForTesting(
+  overrides: Partial<typeof defaultDependencies> = {},
+): void {
+  dependencies = { ...defaultDependencies, ...overrides };
+}
+
+// Fleet: SessionStart injection against the server runtime — the worker's
+// `GET /api/context/inject`, served by `POST /v1/context/recent`. Returns
+// null when the hook should fall through to the worker path.
+async function serverContext(
+  runtime: ServerRuntimeContext,
+  projects: string[],
+  platformSource: string | undefined,
+  colors: boolean,
+): Promise<string | null> {
+  try {
+    const result = await runtime.client.recentContext({
+      projects,
+      ...(platformSource !== undefined ? { platformSource } : {}),
+      colors,
+    });
+    return typeof result.context === 'string' ? result.context.trim() : '';
+  } catch (error: unknown) {
+    if (isServerClientError(error) && error.status === 404) {
+      // An older server without the route: nothing to inject, not a
+      // fallback — the worker would only ever hold what this client wrote.
+      logger.warn('HOOK', 'server has no /v1/context/recent; injecting nothing');
+      return '';
+    }
+    if (isServerClientError(error) && error.isFallbackEligible() && runtime.workerFallback !== false) {
+      dependencies.logServerFallback(error.kind, {
+        status: error.status,
+        message: error.message,
+        route: '/v1/context/recent',
+      });
+      return null;
+    }
+    logger.error('HOOK', 'Server context failed (non-recoverable)', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return '';
+  }
+}
+
 export const contextHandler: EventHandler = {
   async execute(input: NormalizedHookInput): Promise<HookResult> {
     const cwd = input.cwd ?? process.cwd();
+    const { executeWithWorkerFallback, isWorkerFallback, loadFromFileOnce, shouldTrackProject } = dependencies;
 
     // Honor CLAUDE_MEM_EXCLUDED_PROJECTS on the inject/read path too. The
     // write path (ingestObservation) already skips excluded projects, but the
@@ -65,6 +130,26 @@ export const contextHandler: EventHandler = {
       hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: '' },
       exitCode: HOOK_EXIT_CODES.SUCCESS,
     };
+
+    const runtime = dependencies.resolveRuntimeContext();
+    if (runtime.runtime === 'server') {
+      const served = await serverContext(runtime, context.allProjects, normalizedPlatformSource, false);
+      if (served !== null) {
+        let systemMessage: string | undefined;
+        if (showTerminalOutput) {
+          const colored = input.platform === 'claude-code'
+            ? await serverContext(runtime, context.allProjects, normalizedPlatformSource, true)
+            : served;
+          const display = colored || served;
+          systemMessage = display ? `${display}\n\nMemory server: ${runtime.serverBaseUrl}` : undefined;
+        }
+        return {
+          hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: served },
+          systemMessage,
+        };
+      }
+      // fall through to the worker path
+    }
 
     // ponytail: Codex's MCP normally starts the worker; this one bounded
     // fallback covers cold sessions without the old startup process chain.

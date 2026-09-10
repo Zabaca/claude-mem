@@ -20,6 +20,7 @@ import {
   type ServerRuntimeContext,
 } from '../../services/hooks/runtime-selector.js';
 import { isServerClientError } from '../../services/hooks/server-client.js';
+import { resolveServerProjectId as defaultResolveServerProjectId } from '../../services/hooks/server-project.js';
 
 interface SessionInitResponse {
   sessionDbId: number;
@@ -41,6 +42,7 @@ const defaultDependencies = {
   resolveRuntimeContext: defaultResolveRuntimeContext,
   logServerFallback: defaultLogServerFallback,
   shouldTrackProject: defaultShouldTrackProject,
+  resolveServerProjectId: defaultResolveServerProjectId,
 };
 
 let dependencies = defaultDependencies;
@@ -86,13 +88,13 @@ export const sessionInitHandler: EventHandler = {
     // value. Legacy `'server-beta'` is normalized inside `selectRuntime()`.
     if (runtime.runtime === 'server') {
       try {
-        await startServerSession(runtime, input, sessionId, platformSource, project, prompt);
-        // Server does not currently support the same context-injection
-        // protocol as the worker. Skip semantic injection in server mode
-        // until the server context endpoint exists.
+        const projectId = await dependencies.resolveServerProjectId(runtime, cwd);
+        await startServerSession(runtime, input, sessionId, platformSource, project, prompt, projectId);
+        // Recent-context injection happens in the SessionStart hook
+        // (context.ts); semantic injection has no server equivalent.
         return { continue: true, suppressOutput: true };
       } catch (error: unknown) {
-        if (isServerClientError(error) && error.isFallbackEligible()) {
+        if (isServerClientError(error) && error.isFallbackEligible() && runtime.workerFallback !== false) {
           dependencies.logServerFallback(error.kind, {
             status: error.status,
             message: error.message,
@@ -191,9 +193,10 @@ async function startServerSession(
   platformSource: string,
   project: string,
   prompt: string,
+  projectId: string,
 ): Promise<void> {
   await runtime.client.startSession({
-    projectId: runtime.projectId,
+    projectId,
     externalSessionId: sessionId,
     contentSessionId: sessionId,
     agentId: input.agentId ?? null,

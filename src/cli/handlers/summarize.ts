@@ -14,18 +14,21 @@ import { shouldTrackProject } from '../../shared/should-track-project.js';
 import { resolveRuntimeContext, logServerFallback } from '../../services/hooks/runtime-selector.js';
 import type { ServerRuntimeContext } from '../../services/hooks/runtime-selector.js';
 import { isServerClientError } from '../../services/hooks/server-client.js';
+import { resolveServerProjectId } from '../../services/hooks/server-project.js';
 
 async function summarizeViaServer(
   runtime: ServerRuntimeContext,
   sessionId: string,
   lastAssistantMessage: string,
   platformSource: string,
+  cwd: string,
 ): Promise<HookResult> {
+  const projectId = await resolveServerProjectId(runtime, cwd);
   // Resolve the server_session_id idempotently. /v1/sessions/start is
   // idempotent on (projectId, externalSessionId) and returns the
   // existing row when present.
   const startResult = await runtime.client.startSession({
-    projectId: runtime.projectId,
+    projectId,
     externalSessionId: sessionId,
     contentSessionId: sessionId,
     platformSource,
@@ -34,7 +37,7 @@ async function summarizeViaServer(
   // Record the last assistant message as an event before closing the
   // session so it lands in the generation pipeline.
   await runtime.client.recordEvent({
-    projectId: runtime.projectId,
+    projectId,
     serverSessionId,
     contentSessionId: sessionId,
     platformSource,
@@ -129,9 +132,9 @@ export const summarizeHandler: EventHandler = {
     // value. Legacy `'server-beta'` is normalized inside `selectRuntime()`.
     if (runtime.runtime === 'server') {
       try {
-        return await summarizeViaServer(runtime, sessionId, lastAssistantMessage, platformSource);
+        return await summarizeViaServer(runtime, sessionId, lastAssistantMessage, platformSource, input.cwd ?? process.cwd());
       } catch (error: unknown) {
-        if (isServerClientError(error) && error.isFallbackEligible()) {
+        if (isServerClientError(error) && error.isFallbackEligible() && runtime.workerFallback !== false) {
           logServerFallback(error.kind, {
             status: error.status,
             message: error.message,

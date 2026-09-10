@@ -19,15 +19,20 @@
 
 import { loadFromFileOnce } from '../../shared/hook-settings.js';
 import { logger } from '../../utils/logger.js';
-import { ServerClient, type ServerClientConfig } from './server-client.js';
+import { ServerClient, isServerClientError, type ServerClientConfig } from './server-client.js';
 
 export type SelectedRuntime = 'worker' | 'server';
 
 export interface ServerRuntimeContext {
   runtime: 'server';
   client: ServerClient;
+  // Fleet: a fixed project id is optional. When empty, hooks resolve the
+  // project per repo through `resolveServerProjectId` (server-project.ts).
   projectId: string;
   serverBaseUrl: string;
+  // Fleet: `CLAUDE_MEM_SERVER_WORKER_FALLBACK`. False means a server outage
+  // is a logged hook failure, never a silent write into a local SQLite.
+  workerFallback: boolean;
 }
 
 export interface WorkerRuntimeContext {
@@ -80,10 +85,7 @@ export function buildServerContext(): ServerRuntimeContext | null {
     logger.warn('HOOK', '[server-fallback] reason=missing_api_key');
     return null;
   }
-  if (!projectId) {
-    logger.warn('HOOK', '[server-fallback] reason=missing_project_id');
-    return null;
-  }
+  const workerFallback = String(settings.CLAUDE_MEM_SERVER_WORKER_FALLBACK ?? 'true').trim().toLowerCase() !== 'false';
 
   const config: ServerClientConfig = {
     serverBaseUrl,
@@ -94,7 +96,16 @@ export function buildServerContext(): ServerRuntimeContext | null {
     client: new ServerClient(config),
     projectId,
     serverBaseUrl,
+    workerFallback,
   };
+}
+
+// Fleet: a transport-class failure falls back to the worker only when the
+// setting allows it. Contexts built by older callers (tests) lack the field
+// and keep upstream's behaviour.
+export function shouldFallBackToWorker(runtime: ServerRuntimeContext, error: unknown): boolean {
+  if (!isServerClientError(error) || !error.isFallbackEligible()) return false;
+  return runtime.workerFallback !== false;
 }
 
 export function resolveRuntimeContext(): RuntimeContext {

@@ -7,6 +7,7 @@ import type { Database } from 'bun:sqlite';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { getWorkerPort, getWorkerHost, fetchWithTimeout, resolveWorkerScriptPath } from '../shared/worker-utils.js';
+import { selectRuntime } from './hooks/runtime-selector.js';
 import { getCurrentWorkerPid, verifyRestartedWorker } from './restart-verify.js';
 import { runShutdownSequence, type WorkerShutdownReason } from './worker-shutdown.js';
 import { DATA_DIR, DB_PATH, USER_SETTINGS_PATH, ensureDir } from '../shared/paths.js';
@@ -1112,6 +1113,12 @@ async function main() {
 
   switch (command) {
     case 'start': {
+      // Fleet: a client on the server runtime has nothing local to start —
+      // a worker (and Chroma) spun up here would hold a SQLite nobody reads.
+      if (selectRuntime() === 'server') {
+        exitWithStatus('ready', 'Server runtime selected; no local worker started');
+        break;
+      }
       const result = await ensureWorkerStarted(port);
       if (result === 'dead') {
         exitWithStatus('error', 'Failed to start worker');

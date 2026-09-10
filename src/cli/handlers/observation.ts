@@ -10,6 +10,7 @@ import { shouldTrackProject } from '../../shared/should-track-project.js';
 import { normalizePlatformSource } from '../../shared/platform-source.js';
 import { resolveRuntimeContext, logServerFallback } from '../../services/hooks/runtime-selector.js';
 import { isServerClientError, type ServerRecordEventRequest } from '../../services/hooks/server-client.js';
+import { resolveServerProjectId } from '../../services/hooks/server-project.js';
 
 async function dispatchToWorker(
   input: NormalizedHookInput,
@@ -66,8 +67,10 @@ export const observationHandler: EventHandler = {
     // value. `runtime-selector.selectRuntime()` continues to accept the legacy
     // `'server-beta'` literal in settings.json and normalizes it to `'server'`.
     if (runtime.runtime === 'server') {
+      try {
+      const projectId = await resolveServerProjectId(runtime, cwd);
       const event: ServerRecordEventRequest = {
-        projectId: runtime.projectId,
+        projectId,
         contentSessionId: sessionId,
         platformSource,
         sourceType: 'hook',
@@ -84,12 +87,11 @@ export const observationHandler: EventHandler = {
           tool_use_id: input.toolUseId,
         },
       };
-      try {
         await runtime.client.recordEvent(event);
         logger.debug('HOOK', 'Observation sent successfully via server', { toolName });
         return { continue: true, suppressOutput: true };
       } catch (error: unknown) {
-        if (isServerClientError(error) && error.isFallbackEligible()) {
+        if (isServerClientError(error) && error.isFallbackEligible() && runtime.workerFallback !== false) {
           logServerFallback(error.kind, { status: error.status, message: error.message, route: '/v1/events' });
           // fall through to worker fallback
         } else {

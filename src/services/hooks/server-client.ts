@@ -195,6 +195,28 @@ export interface ServerJobStatusResponse {
   };
 }
 
+// Fleet: per-repo project resolution and the recent-context injection the
+// worker's `GET /api/context/inject` provides locally.
+export interface ServerResolveProjectsResponse {
+  projects: Array<{ id: string; name: string }>;
+}
+
+export interface ServerRecentContextRequest {
+  projects: string[];
+  platformSource?: string | null;
+  colors?: boolean;
+}
+
+export interface ServerRecentContextResponse {
+  context: string;
+  stats: Record<string, unknown> | null;
+}
+
+export interface ServerLatestObservationResponse {
+  createdAt: string | null;
+  count: number;
+}
+
 export class ServerClient {
   private readonly baseUrl: string;
   private readonly apiKey: string;
@@ -277,6 +299,22 @@ export class ServerClient {
       'GET',
       `/v1/jobs/${encodeURIComponent(jobId)}`,
     );
+  }
+
+  async resolveProjects(names: string[]): Promise<ServerResolveProjectsResponse> {
+    return this.request<ServerResolveProjectsResponse>('POST', '/v1/projects/resolve', { names });
+  }
+
+  async recentContext(input: ServerRecentContextRequest): Promise<ServerRecentContextResponse> {
+    return this.request<ServerRecentContextResponse>('POST', '/v1/context/recent', {
+      projects: input.projects,
+      ...(input.platformSource !== undefined ? { platformSource: normalizePlatformSourceField(input.platformSource) } : {}),
+      ...(input.colors !== undefined ? { colors: input.colors } : {}),
+    });
+  }
+
+  async latestObservation(): Promise<ServerLatestObservationResponse> {
+    return this.request<ServerLatestObservationResponse>('GET', '/v1/observations/latest');
   }
 
   buildAddObservationPayload(
