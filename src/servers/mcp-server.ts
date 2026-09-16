@@ -39,6 +39,7 @@ import {
 } from '../services/hooks/runtime-selector.js';
 import { normalizePlatformSource } from '../shared/platform-source.js';
 import { getAdvertisedMcpToolsForRuntime } from './mcp-tool-visibility.js';
+import { buildServerSearchRequest } from '../services/hooks/server-search.js';
 
 let mcpServerDirResolutionFailed = false;
 const mcpServerDir = (() => {
@@ -198,6 +199,10 @@ function formatJsonResult(payload: unknown): { content: Array<{ type: 'text'; te
       text: JSON.stringify(payload, null, 2),
     }],
   };
+}
+
+async function searchOnServer(sb: ServerAvailable, args: Record<string, unknown>) {
+  return sb.client.searchObservations(await buildServerSearchRequest(sb, args));
 }
 
 function requireServerForObservationTool(toolName: string): ServerAvailable {
@@ -495,33 +500,20 @@ NEVER fetch full details without filtering first. 10x token savings.`,
       additionalProperties: true
     },
     handler: async (args: any) => {
-      // In server-beta runtime the local worker /api/search reads the local SQLite via
-      // the Chroma-backed SearchOrchestrator. When the install runs server-beta (where
-      // generated observations live in Postgres, not local SQLite) and Chroma is not
-      // configured, observation text queries return empty — so `search` silently yields
-      // 0 observations even though the data is in PG.
-      //
-      // Route to the PG-backed /v1/search (same path as observation_search) ONLY when it
-      // can serve the request faithfully: server-beta is available, there is a text query,
-      // the result type is observations (or unspecified), and no filter /v1/search cannot
-      // honor is set. /v1/search is observations-only and takes only { projectId, query,
-      // limit } — so prompt/session-typed queries and platformSource/project/obs_type/date/
-      // offset/orderBy filters must keep the worker path (which applies them), otherwise we
-      // would silently drop the filter or mis-route the query.
+      // Server runtime: every search goes to the PG-backed /v1/search. The
+      // local worker's /api/search reads the local SQLite, which under the
+      // server runtime holds nothing (or, worse, a pre-migration copy), so it
+      // is never a fallback here. The project id is the one the hooks write
+      // under: a `project` name resolved on the server, else the cwd's repo
+      // (fleet installs pin no CLAUDE_MEM_SERVER_PROJECT_ID). Filters the
+      // server cannot honour — sessions and prompts are not on it — fail
+      // loudly rather than silently dropping.
       const sb = resolveServerToolContext();
-      const hasText = typeof args?.query === 'string' && args.query.trim().length > 0;
-      const typeIsObservations = args?.type === undefined || args?.type === 'observations';
-      const hasUnsupportedFilter =
-        args?.platformSource !== undefined || args?.project !== undefined ||
-        args?.obs_type !== undefined || args?.dateStart !== undefined ||
-        args?.dateEnd !== undefined || args?.offset !== undefined || args?.orderBy !== undefined;
-      if (sb && sb.available && hasText && typeIsObservations && !hasUnsupportedFilter) {
-        const request: ServerSearchObservationsRequest = {
-          projectId: sb.projectId,
-          query: args.query,
-          ...(args.limit !== undefined ? { limit: args.limit } : {}),
-        };
-        return formatJsonResult(await sb.client.searchObservations(request));
+      if (sb) {
+        if (!sb.available) {
+          throw new ServerClientError('missing_api_key', `search: ${sb.reason}`);
+        }
+        return formatJsonResult(await searchOnServer(sb, args ?? {}));
       }
       return await callWorker('/api/search', { query: args });
     }

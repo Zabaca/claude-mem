@@ -182,6 +182,36 @@ describe('Phase 8 MCP-backing REST endpoints (/v1/memories, /v1/search, /v1/cont
     expect(noMatches.observations).toHaveLength(0);
   });
 
+  it('fleet: /v1/search honours kind, date, order and offset filters', async () => {
+    const c = buildClient();
+    // Seeded over raw HTTP: the client's addObservation speaks `narrative`
+    // to a route that wants `content` (upstream drift, fails on `fleet` too).
+    for (const [content, kind] of [['filterable observation alpha', 'decision'], ['filterable observation beta', 'bugfix']]) {
+      const seeded = await fetch(`http://127.0.0.1:${port}/v1/memories`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${apiKeyRaw}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ projectId, content, kind }),
+      });
+      expect(seeded.status).toBe(201);
+    }
+
+    const decisions = await c.searchObservations({ projectId, query: 'filterable', kinds: ['decision'] });
+    expect(decisions.observations.map(o => o.content)).toEqual(['filterable observation alpha']);
+
+    const asc = await c.searchObservations({ projectId, query: 'filterable', orderBy: 'date_asc' });
+    const desc = await c.searchObservations({ projectId, query: 'filterable', orderBy: 'date_desc' });
+    expect(asc.observations).toHaveLength(2);
+    expect(desc.observations.map(o => o.id)).toEqual([...asc.observations.map(o => o.id)].reverse());
+
+    const second = await c.searchObservations({ projectId, query: 'filterable', orderBy: 'date_asc', limit: 1, offset: 1 });
+    expect(second.observations.map(o => o.id)).toEqual([asc.observations[1]!.id]);
+
+    const future = await c.searchObservations({ projectId, query: 'filterable', dateStartEpoch: Date.now() + 60_000 });
+    expect(future.observations).toHaveLength(0);
+    const past = await c.searchObservations({ projectId, query: 'filterable', dateEndEpoch: Date.now() - 60_000 });
+    expect(past.observations).toHaveLength(0);
+  });
+
   it('observation_context path: POST /v1/context returns observations + concatenated context', async () => {
     const c = buildClient();
     await c.addObservation({ projectId, content: 'first observation about deployment pipeline', kind: 'manual' });

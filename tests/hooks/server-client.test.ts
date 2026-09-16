@@ -318,6 +318,11 @@ describe('ServerClient', () => {
       query: 'q',
       platformSource: 'codex',
     });
+    expect(client.buildSearchPayload({
+      projectId: 'p', query: 'q', offset: 3, kinds: ['decision'], dateStartEpoch: 1, dateEndEpoch: 2, orderBy: 'date_asc',
+    })).toEqual({
+      projectId: 'p', query: 'q', offset: 3, kinds: ['decision'], dateStartEpoch: 1, dateEndEpoch: 2, orderBy: 'date_asc',
+    });
     expect(client.buildEventPayload({
       projectId: 'p',
       sourceType: 'hook',

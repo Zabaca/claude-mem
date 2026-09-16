@@ -917,7 +917,12 @@ export class ServerV1PostgresRoutes implements RouteHandler {
         projectId: z.string().min(1),
         query: z.string().min(1),
         limit: z.number().int().positive().max(100).optional(),
+        offset: z.number().int().nonnegative().optional(),
         platformSource: z.string().min(1).nullable().optional(),
+        kinds: z.array(z.string().min(1)).max(16).optional(),
+        dateStartEpoch: z.number().int().nonnegative().optional(),
+        dateEndEpoch: z.number().int().nonnegative().optional(),
+        orderBy: z.enum(['rank', 'date_desc', 'date_asc']).optional(),
       }),
       async (req, res, body) => {
         const teamId = this.requireTeamId(req, res);
@@ -932,7 +937,12 @@ export class ServerV1PostgresRoutes implements RouteHandler {
             teamId,
             query: body.query,
             limit: body.limit ?? 20,
+            offset: body.offset,
             platformSource,
+            kinds: body.kinds,
+            dateStartEpoch: body.dateStartEpoch,
+            dateEndEpoch: body.dateEndEpoch,
+            orderBy: body.orderBy,
           });
         } catch (error) {
           const err = error instanceof Error ? error : new Error(String(error));

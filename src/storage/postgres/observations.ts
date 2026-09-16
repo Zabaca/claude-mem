@@ -212,9 +212,24 @@ export class PostgresObservationRepository {
     teamId: string;
     query: string;
     limit?: number;
+    offset?: number;
     platformSource?: string | null;
+    // Fleet: the MCP `search` tool's filters, so a server-runtime client
+    // never has to fall back to a local SQLite that holds nothing.
+    kinds?: string[] | null;
+    dateStartEpoch?: number | null;
+    dateEndEpoch?: number | null;
+    orderBy?: 'rank' | 'date_desc' | 'date_asc';
   }): Promise<PostgresObservation[]> {
     const platformSource = normalizePlatformSourceOrNull(input.platformSource);
+    const kinds = input.kinds && input.kinds.length > 0 ? input.kinds : null;
+    const dateStart = input.dateStartEpoch != null ? new Date(input.dateStartEpoch).toISOString() : null;
+    const dateEnd = input.dateEndEpoch != null ? new Date(input.dateEndEpoch).toISOString() : null;
+    const orderBy = input.orderBy === 'date_desc'
+      ? 'observations.created_at DESC'
+      : input.orderBy === 'date_asc'
+        ? 'observations.created_at ASC'
+        : "ts_rank(observations.content_search, websearch_to_tsquery('english', $3)) DESC, observations.updated_at DESC";
     const result = await this.client.query<ObservationRow>(
       `
         SELECT observations.* FROM observations
@@ -243,10 +258,13 @@ export class PostgresObservationRepository {
               )
             )
           )
-        ORDER BY ts_rank(observations.content_search, websearch_to_tsquery('english', $3)) DESC, observations.updated_at DESC
-        LIMIT $4
+          AND ($6::text[] IS NULL OR observations.kind = ANY($6::text[]))
+          AND ($7::timestamptz IS NULL OR observations.created_at >= $7::timestamptz)
+          AND ($8::timestamptz IS NULL OR observations.created_at <= $8::timestamptz)
+        ORDER BY ${orderBy}
+        LIMIT $4 OFFSET $9
       `,
-      [input.projectId, input.teamId, input.query, input.limit ?? 20, platformSource]
+      [input.projectId, input.teamId, input.query, input.limit ?? 20, platformSource, kinds, dateStart, dateEnd, input.offset ?? 0]
     );
     return result.rows.map(mapObservationRow);
   }

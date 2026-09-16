@@ -155,7 +155,12 @@ export interface ServerSearchObservationsRequest {
   projectId: string;
   query: string;
   limit?: number;
+  offset?: number;
   platformSource?: string | null;
+  kinds?: string[];
+  dateStartEpoch?: number;
+  dateEndEpoch?: number;
+  orderBy?: 'rank' | 'date_desc' | 'date_asc';
 }
 
 export interface ServerSearchObservationsResponse {
@@ -342,13 +347,21 @@ export class ServerClient {
   }
 
   buildSearchPayload(
-    input: { projectId: string; query: string; limit?: number; platformSource?: string | null },
+    input: {
+      projectId: string; query: string; limit?: number; offset?: number; platformSource?: string | null;
+      kinds?: string[]; dateStartEpoch?: number; dateEndEpoch?: number; orderBy?: 'rank' | 'date_desc' | 'date_asc';
+    },
   ): Record<string, unknown> {
     return {
       projectId: input.projectId,
       query: input.query,
       ...(input.limit !== undefined ? { limit: input.limit } : {}),
+      ...(input.offset !== undefined ? { offset: input.offset } : {}),
       ...(input.platformSource !== undefined ? { platformSource: normalizePlatformSourceField(input.platformSource) } : {}),
+      ...(input.kinds !== undefined ? { kinds: input.kinds } : {}),
+      ...(input.dateStartEpoch !== undefined ? { dateStartEpoch: input.dateStartEpoch } : {}),
+      ...(input.dateEndEpoch !== undefined ? { dateEndEpoch: input.dateEndEpoch } : {}),
+      ...(input.orderBy !== undefined ? { orderBy: input.orderBy } : {}),
     };
   }
 
