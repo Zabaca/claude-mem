@@ -22,6 +22,11 @@ export function shouldTrackProject(cwd: string): boolean {
   return !isProjectExcluded(cwd, settings.CLAUDE_MEM_EXCLUDED_PROJECTS);
 }
 
+export function shouldSkipTool(toolName: string): boolean {
+  const skipTools = (loadFromFileOnce().CLAUDE_MEM_SKIP_TOOLS ?? '').split(',').map(t => t.trim());
+  return skipTools.includes(toolName);
+}
+
 export function shouldEmitProjectRow(project: string | null | undefined): boolean {
   if (!project) return true;
   return project !== OBSERVER_SESSIONS_PROJECT;

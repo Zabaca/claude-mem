@@ -6,7 +6,7 @@ import type { EventHandler, NormalizedHookInput, HookResult } from '../types.js'
 import { executeWithWorkerFallback, isWorkerFallback } from '../../shared/worker-utils.js';
 import { logger } from '../../utils/logger.js';
 import { HOOK_EXIT_CODES } from '../../shared/hook-constants.js';
-import { shouldTrackProject } from '../../shared/should-track-project.js';
+import { shouldTrackProject, shouldSkipTool } from '../../shared/should-track-project.js';
 import { normalizePlatformSource } from '../../shared/platform-source.js';
 import { resolveRuntimeContext, logServerFallback } from '../../services/hooks/runtime-selector.js';
 import { isServerClientError, type ServerRecordEventRequest } from '../../services/hooks/server-client.js';
@@ -59,6 +59,13 @@ export const observationHandler: EventHandler = {
 
     if (!shouldTrackProject(cwd)) {
       logger.debug('HOOK', 'Project excluded from tracking, skipping observation', { cwd, toolName });
+      return { continue: true, suppressOutput: true };
+    }
+
+    // Checked here because the server lane never reaches the local worker's
+    // ingestObservation, the only other place CLAUDE_MEM_SKIP_TOOLS is read.
+    if (shouldSkipTool(toolName)) {
+      logger.debug('HOOK', 'Tool excluded from tracking, skipping observation', { toolName });
       return { continue: true, suppressOutput: true };
     }
 
